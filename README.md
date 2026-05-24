@@ -668,39 +668,4 @@ pio device monitor
 
 ---
 
-# Example Serial Output
 
-```text
-512
-514
-509
-520
-```
-
----
-
-# Educational Value
-
-This project resembles simplified versions of:
-
-- cyclic executives
-- event-loop firmware
-- cooperative RTOS kernels
-- embedded runtime systems
-- lightweight task schedulers
-
-It serves as an excellent stepping stone toward:
-
-- FreeRTOS
-- Zephyr
-- embedded Linux
-- asynchronous runtimes
-- real-time systems design
-
----
-
-# License
-
-MIT License
-
-Feel free to modify, extend, and use this project for educational or embedded systems development purposes.
