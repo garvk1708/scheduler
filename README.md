@@ -46,6 +46,23 @@ In embedded systems development, managing multiple periodic tasks (e.g., polling
 
 ---
 
+# Repository Layout
+
+```text
+├── platformio.ini         # PlatformIO project configuration
+├── src/
+│   ├── main.cpp           # Barebones boilerplate ready for custom tasks
+│   ├── my_scheduler.h     # Core timing execution scheduler engine
+│   └── drivers/           # Hardware abstraction layers (LED, ADC, UART)
+└── examples/              # Preconfigured application reference files
+    ├── 01_blink.cpp
+    ├── 02_dual_sensor_alarm.cpp
+    ├── 03_one_shot_timers.cpp
+    └── 04_cpu_profiling.cpp
+```
+
+---
+
 # Scheduler Engine Architecture
 
 The scheduler is built around two primary abstractions: a `Job` (representing a task) and the `Scheduler` (handling task traversal).
@@ -79,191 +96,74 @@ if (currentTime - current->lastExecutionTime >= current->intervalMs)
 Due to two's-complement arithmetic, if $t_{\text{current}}$ rolls over (e.g., $5$) and $t_{\text{last}}$ is near the maximum limit (e.g., $2^{32} - 10$), the subtraction wraps around to the correct positive difference ($15$), guaranteeing timing stability indefinitely.
 
 ### 2. Linked List Task Queue
-Instead of allocating a fixed-size array which restricts flexibility, tasks are chained using a singly linked list. When a job is registered via `core.add(newJob)`, it is appended to the list tail in $O(N)$ time. Traversal in the execution loop is a linear $O(N)$ sweep, which completes in microseconds.
+Instead of allocating a fixed-size array which restricts flexibility, tasks are chained using a singly linked list. When a job is registered via `core.add(newJob)`, it is appended to the list tail in $O(N)$ time. Traversal in the execution loop is a linear $O(N)$ sweep.
 
 ---
 
-# Step-by-Step Interfacing Example
+# Preconfigured Examples Index
 
-The project workspace contains a fully structured example illustrating how to read two sensors and actuate two outputs concurrently without blocking.
+To explore different cooperative multitasking configurations, you can copy the contents of any file in [examples/](file:///home/garv/Desktop/scheduler/examples/) directly into [src/main.cpp](file:///home/garv/Desktop/scheduler/src/main.cpp) and compile/upload it to your ESP8266.
 
-### Hardware Interface Configuration
+### [1. Blink Example](file:///home/garv/Desktop/scheduler/examples/01_blink.cpp)
+- **Concept**: A simple non-blocking status blinker.
+- **Goal**: Demonstrates registering a basic callback function to toggle the internal onboard LED every 500ms without utilizing `delay()`.
 
-```
-                         ESP8266 (NodeMCU)
-                         +---------------+
-                         |   GPIO2/D4    |---> [Internal Onboard LED] (Active-Low)
-                         |               |
-                         |   GPIO5/D1    |---> [External Alarm LED]   (Active-High)
-                         |               |
-   [IR Sensor] --------->|   GPIO4/D2    |
- (Digital Proximity)     |               |
-                         |     A0        |<--- [Temp Sensor] (LM35/Thermistor)
-                         +---------------+
-```
+### [2. Dual-Sensor Alarm Example](file:///home/garv/Desktop/scheduler/examples/02_dual_sensor_alarm.cpp)
+- **Concept**: A physical safety monitoring alarm loop.
+- **Hardware setup**:
+  - **IR Proximity Sensor**: Digital sensor reading on GPIO4 (D2).
+  - **Temperature Sensor**: Analog input on A0.
+  - **Internal LED**: Onboard heartbeat.
+  - **External LED**: GPIO5 (D1) alarm output.
+- **Goal**: Illustrates dynamic task rescheduling. The internal LED blinks slowly (1s) under safe states but switches to a rapid panic flash (150ms) if the IR sensor detects an obstacle or the temperature goes above a defined threshold. The external LED acts as a physical alarm flag.
 
-The example code is placed in [example.cpp](file:///home/garv/Desktop/scheduler/src/example.cpp). To use it, simply copy its contents into `main.cpp` or change the source filter configuration in your PlatformIO build settings.
+### [3. One-Shot Software Timers](file:///home/garv/Desktop/scheduler/examples/03_one_shot_timers.cpp)
+- **Concept**: Dynamic task lifecycle management.
+- **Goal**: Shows how to run a task a finite number of times (one-shot). When a user types `trigger 3000` via the CLI monitor, it switches ON the external LED and schedules a timer job with a `repeatCount = 1` to execute in 3000ms. Once the timer finishes, it turns OFF the LED and self-suspends.
 
-### Fully Documented Example Code
-Below is the C++ implementation showing how the cooperative tasks interact via shared states:
-
-```cpp
-#include <Arduino.h>
-#include <ESP8266WiFi.h>
-
-#include "my_scheduler.h"
-#include "drivers/led.h"
-#include "drivers/adc.h"
-#include "drivers/uart.h"
-
-#define IR_SENSOR_PIN 4
-#define TEMP_ALERT_THRESHOLD 700
-
-Scheduler core;
-
-void blinkHeartbeat();
-void readIRSensor();
-void readTemperatureSensor();
-void handleUARTShell();
-
-// Instantiate Job objects (Interval in ms, Repeat Count, Function pointer)
-Job heartbeatJob(1000, INF, &blinkHeartbeat);       // Blinks internal LED
-Job irSensorJob(100, INF, &readIRSensor);            // Polls digital IR sensor
-Job tempSensorJob(1500, INF, &readTemperatureSensor); // Reads analog temperature
-Job uartShellJob(50, INF, &handleUARTShell);          // Command parser
-
-volatile bool irTriggered = false;
-volatile bool tempHigh = false;
-uint16_t latestTempRaw = 0;
-
-void setup() {
-    custom_uart_init(115200);
-    led_init();
-    adc_init();
-
-    pinMode(IR_SENSOR_PIN, INPUT);
-
-    core.add(heartbeatJob);
-    core.add(irSensorJob);
-    core.add(tempSensorJob);
-    core.add(uartShellJob);
-
-    heartbeatJob.start();
-    irSensorJob.start();
-    tempSensorJob.start();
-    uartShellJob.start();
-
-    // Disable WiFi to conserve power and reduce ADC noise
-    WiFi.mode(WIFI_OFF);
-    wifi_set_sleep_type(LIGHT_SLEEP_T);
-}
-
-void loop() {
-    core.run(); // Checks time deltas and runs pending jobs
-}
-
-// TASK 1: System Heartbeat Status Blinker
-void blinkHeartbeat() {
-    led_internal_toggle();
-    
-    // Scale blinking frequency based on alarm states
-    if (irTriggered || tempHigh) {
-        heartbeatJob.intervalMs = 150; // Rapid alert flash
-    } else {
-        heartbeatJob.intervalMs = 1000; // Slow calm heartbeat pulse
-    }
-}
-
-// TASK 2: IR Proximity Sensor Polling
-void readIRSensor() {
-    // Read state from digital IR Sensor. LOW means proximity detected
-    bool currentVal = (digitalRead(IR_SENSOR_PIN) == LOW);
-    
-    if (currentVal != irTriggered) {
-        irTriggered = currentVal;
-        if (irTriggered) {
-            Serial.println("[ALERT] IR Sensor: Obstacle Detected!");
-            led_external_set(1); // Set Alarm LED ON
-        } else {
-            Serial.println("[STATUS] IR Sensor: Cleared.");
-            if (!tempHigh) led_external_set(0); // Set Alarm LED OFF
-        }
-    }
-}
-
-// TASK 3: Analog Temperature Sensor Monitor
-void readTemperatureSensor() {
-    latestTempRaw = adc_read_nonblocking();
-    
-    if (latestTempRaw > TEMP_ALERT_THRESHOLD) {
-        if (!tempHigh) {
-            tempHigh = true;
-            Serial.printf("[ALERT] Temperature Threshold Exceeded! Raw: %d\n", latestTempRaw);
-            led_external_set(1);
-        }
-    } else {
-        if (tempHigh) {
-            tempHigh = false;
-            Serial.printf("[STATUS] Temperature returned to normal. Raw: %d\n", latestTempRaw);
-            if (!irTriggered) led_external_set(0);
-        }
-    }
-}
-
-// TASK 4: UART Command Interpreter Shell
-void handleUARTShell() {
-    char cmd[64];
-    if (uart_get_command_nonblocking(cmd, sizeof(cmd))) {
-        if (strcmp(cmd, "stats") == 0) {
-            // Stats printing code...
-        }
-    }
-}
-```
+### [4. CPU Timing Profiling](file:///home/garv/Desktop/scheduler/examples/04_cpu_profiling.cpp)
+- **Concept**: Detecting blocking execution.
+- **Goal**: Simulates a "badly designed" blocking function that blocks the CPU for 1000ms (`delay(1000)`) every 8 seconds. This demonstrates task execution jitter: when the blocker task runs, other tasks freeze. Querying `stats` will immediately isolate the blocker by showing a massive `Max(us)` execution time value.
 
 ---
 
 # Timing Diagnostics and Profiling
 
-A critical issue in cooperative scheduling is that a single blocking or poorly designed task (e.g. executing `delay(100)`) halts the entire scheduler, delaying other jobs.
+A critical rule of cooperative scheduling is that tasks must be **short and non-blocking**. If a task halts the CPU, other tasks are starved.
 
-To monitor this, the scheduler implements microsecond-level timing diagnostics around callback executions using `micros()`. Running the `stats` command via the Serial interface prints a task execution dashboard:
+To monitor CPU usage, the scheduler integrates microsecond-level timing tracking around callback executions using `micros()`. Typing `stats` in the serial prompt displays a timing breakdown:
 
 ```text
---- Scheduler Diagnostics & Timing Stats ---
-Task Name       | State  | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)     
----------------------------------------------------------------------------------------------
-BlinkHeartbeat  | RUN    | 1000         | 120          | 2            | 14           | 3           
-ReadIRSensor    | RUN    | 100          | 1200         | 4            | 28           | 5           
-ReadTempSensor  | RUN    | 1500         | 80           | 112          | 168          | 115         
-UARTShell       | RUN    | 50           | 2400         | 1            | 12           | 2           
----------------------------------------------------------------------------------------------
+--- Scheduler Timing Diagnostics ---
+Task Name       | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)     
+--------------------------------------------------------------------------------------
+FastTask(100ms) | 100          | 1200         | 4            | 28           | 5           
+LoggerTask(1s)  | 1000         | 120          | 2            | 14           | 3           
+Blocker(8s)     | 8000         | 15           | 1000142      | 1000214      | 1000150     
+UARTShell(50ms) | 50           | 2400         | 1            | 12           | 2           
+--------------------------------------------------------------------------------------
 ```
-
-- **Last(us)**: The execution duration of the job's last run in microseconds.
-- **Max(us)**: The longest execution time recorded. Helpful for identifying peak latency spikes.
-- **Avg(us)**: The average execution duration of the task. If any task reports values in the milliseconds range ($>1000\text{ }\mu\text{s}$), it indicates a blocking operation that should be refactored to prevent latency propagation across other tasks.
+If you detect any task reporting high execution times (e.g., `Blocker(8s)` with $1,000,150\text{ }\mu\text{s}$), it indicates CPU blocking that should be refactored into shorter state-machine steps.
 
 ---
 
 # Getting Started Guide
 
-### 1. Compile the Custom Application
-Open your console shell in the directory and compile the program:
+### 1. Build the Boilerplate Project
+To compile the clean scheduler template in [src/main.cpp](file:///home/garv/Desktop/scheduler/src/main.cpp):
 ```bash
-# Builds main.cpp (configured inside platformio.ini)
 ~/.platformio/penv/bin/platformio run
 ```
 
-### 2. Upload Firmware
-Upload the compiled binaries to the ESP8266 board:
+### 2. Upload to ESP8266
+Ensure that your board is connected and any active Serial Monitors are **closed** (to prevent port lock collisions), then run:
 ```bash
 ~/.platformio/penv/bin/platformio run --target upload
 ```
 
 ### 3. Open Serial Shell Monitor
-Interact with the command shell via PlatformIO's device monitor:
+To open the console shell monitor to communicate with the board:
 ```bash
 ~/.platformio/penv/bin/platformio device monitor
 ```
-Type `stats` into the prompt to review task performance statistics.
+Press `Ctrl+C` or `Ctrl+]` to close the serial monitor before uploading subsequent code.
