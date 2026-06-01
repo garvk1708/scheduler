@@ -1,229 +1,269 @@
-# Custom Cooperative Scheduler for ESP8266
+# Cooperative Task Scheduler for ESP8266
 
-A lightweight, fully custom cooperative task scheduler for the ESP8266 built entirely from scratch using modern embedded C++ principles. 
-
-This project demonstrates how to implement deterministic periodic task execution without using `delay()` or any external RTOS/library dependencies. It provides a clean and scalable architecture for writing responsive embedded firmware using cooperative multitasking, linked-list scheduling, modular drivers, and non-blocking execution.
+A custom, low-overhead cooperative task scheduler built from scratch for the ESP8266 (NodeMCU) in embedded C++. This project demonstrates how to run concurrent periodic operations without blocking the CPU or using resource-heavy real-time operating systems (RTOS).
 
 ---
 
-# Features
+# Why Cooperative Task Scheduling?
 
-- **Cooperative Multitasking Scheduler**: Runs multiple periodic tasks concurrently without preemption overhead.
-- **Hardware-Level Non-Blocking Architecture**: Exposes hardware abstractions without utilizing CPU-blocking code.
-- **Dynamic Task Management**: Singly linked-list based structure allowing runtime modifications.
-- **Real-Time Task Profiling**: Built-in microsecond-level timing diagnostics for execution time tracking.
-- **System Alarm Use Case**: Interactive example utilizing an internal LED, external LED, and analog sensor.
-- **UART Command Shell**: Simple built-in interactive CLI parser to toggle pins and view stats.
+In embedded systems development, managing multiple periodic tasks (e.g., polling sensors, blinking status lights, parsing serial commands) is a core challenge. Developers typically rely on one of three patterns:
 
----
+```
++---------------------------------------------------------------------------------+
+|                                 1. BLOCKING DELAYS                              |
+|  Loop:  [Read Sensor] -> (Delay 1000ms) -> [Blink LED] -> (Delay 500ms)         |
+|  * Disadvantage: The CPU blocks completely during delay, losing data & command  |
+|                  inputs. Concurrent operations are impossible.                  |
++---------------------------------------------------------------------------------+
+                                         |
+                                         v
++---------------------------------------------------------------------------------+
+|                            2. PREEMPTIVE RTOS (FreeRTOS)                        |
+|  Tasks interrupt each other based on priority. Needs mutexes/semaphores.       |
+|  * Disadvantage: Significant RAM overhead, stack allocation requirements, context|
+|                  switching lag, and risk of deadlocks/race conditions.          |
++---------------------------------------------------------------------------------+
+                                         |
+                                         v
++---------------------------------------------------------------------------------+
+|                       3. COOPERATIVE SCHEDULING (This Project)                  |
+|  Tasks voluntarily yield control. Traverses a linked list checking elapsed      |
+|  time on each loop iteration. Runs tasks when scheduled interval expires.       |
+|  * Advantage: Zero context-switching lag, extremely lightweight (runs on small  |
+|               microcontrollers), zero race conditions (single thread execution).|
++---------------------------------------------------------------------------------+
+```
 
-# Hardware Mapping
+### Architectural Comparison
 
-This project is tailored for the **ESP8266 NodeMCU V2**, but runs on any ESP8266 module:
-
-| Device/Component | Pin / Interface | Active State | Purpose |
+| Metric | Blocking Delays (`delay`) | Preemptive RTOS (FreeRTOS) | Cooperative Scheduler (Our design) |
 |---|---|---|---|
-| **Internal Onboard LED** | `GPIO2` / `D4` | **Active-Low** | Safe heartbeat (slow blink) / Alarm alert (rapid flash) |
-| **External Alarm LED** | `GPIO5` / `D1` | **Active-High** | Secondary indicator toggled via CLI command |
-| **Analog Sensor** (LDR/Thermistor) | `ADC0` / `A0` | `0` to `1023` (10-bit) | Inputs light/temperature readings for threshold analysis |
-| **UART Shell Interface** | Serial / USB | `115200 Baud` | Control LEDs and query scheduler telemetry |
+| **CPU Efficiency** | Low (wastes cycles in delay loops) | Moderate (context switch overhead) | **High** (checks elapsed time and yields) |
+| **RAM Footprint** | Extremely Low | High (requires separate stack per task) | **Extremely Low** (uses single main stack) |
+| **Simplicity** | High (simple but non-functional) | Low (requires mutexes, critical sections) | **High** (straightforward C++ execution) |
+| **Race Conditions**| None (sequential execution) | High risk (requires thread safety) | **None** (sequential non-blocking execution) |
+| **Max Concurrent Tasks** | 1 (effectively) | Limited by RAM stacks (e.g., 5-10) | **Unlimited** (limited only by CPU bandwidth) |
 
 ---
 
-# Getting Started
+# Scheduler Engine Architecture
 
-Follow these steps to build, flash, and test the project:
-
-### 1. Requirements & Prerequisites
-Ensure you have the PlatformIO Core CLI installed (which we set up in the `~/.platformio/penv` directory) or have VSCode with the PlatformIO extension.
-
-### 2. Connect Your ESP8266
-Plug your ESP8266 into your computer's USB port. It should be detected as a serial device (typically `/dev/ttyUSB0` on Linux, `/dev/tty.usbserial` on macOS, or `COMx` on Windows).
-
-### 3. Compile the Firmware
-Open your terminal in the project directory and run the compilation script:
-```bash
-# Compile using the PlatformIO command line
-~/.platformio/penv/bin/platformio run
-```
-
-### 4. Upload to ESP8266
-Flash the compiled binary to the connected board:
-```bash
-~/.platformio/penv/bin/platformio run --target upload
-```
-
-### 5. Monitor and Control
-Open the serial interactive terminal at `115200 baud` rate:
-```bash
-~/.platformio/penv/bin/platformio device monitor
-```
-Once connected, try entering the commands:
-- `led on`
-- `led off`
-- `led toggle`
-- `stats`
-
----
-
-# Practical Usecase: Smart Ambient Monitor & Alarm
-
-The included [main.cpp](file:///home/garv/Desktop/scheduler/src/main.cpp) implements a **Smart Ambient Monitor and Alarm System**. 
+The scheduler is built around two primary abstractions: a `Job` (representing a task) and the `Scheduler` (handling task traversal).
 
 ```
-                                  +-------------------+
-  Analog Sensor (LDR/Temp) ------>|    A0 (ADC Read)  |
-                                  +---------+---------+
-                                            |
-                                            v  (Every 1000ms)
-                                  +-------------------+
-                                  | Threshold Check   |
-                                  |    (Limit: 600)   |
-                                  +---------+---------+
-                                            |
-                         +------------------+------------------+
-                         |                                     |
-                (If Value > 600)                      (If Value <= 600)
-                         v                                     v
-             +-----------------------+             +-----------------------+
-             |   Rapid Warning Blink |             |   Slow Heartbeat Blink|
-             |       (Interval = 100ms) |             |      (Interval = 1000ms) |
-             +-----------------------+             +-----------------------+
+                      Scheduler Object
+                             |
+                             v
+                     +---------------+
+                     |   firstJob    |
+                     +-------+-------+
+                             |
+                             v
++----------------+   +----------------+   +----------------+
+|      Job 1     |   |      Job 2     |   |      Job 3     |
+| - intervalMs   |   | - intervalMs   |   | - intervalMs   |
+| - repeatCount  |-->| - repeatCount  |-->| - repeatCount  |--> NULL
+| - actionFunc   |   | - actionFunc   |   | - actionFunc   |
+| - nextJob      |   | - nextJob      |   | - nextJob      |
++----------------+   +----------------+   +----------------+
 ```
 
-### How the Usecase Works:
-1. **Heartbeat / Status Loop**: The onboard **Internal LED** blinks slowly at a `1000ms` interval under normal conditions, signaling the system is functioning correctly.
-2. **Periodic Sensor Sampling**: Every `1000ms`, the **Sensor Task** reads the analog input on pin `A0` (connected to an LDR light-sensor, potentiometer, or thermistor).
-3. **Dynamic Scheduling Reconfiguration**:
-   - If the sensor value exceeds `600` (representing high heat or light), the Sensor Task **re-schedules** the internal LED blinking task to execute at a rapid `100ms` warning rate.
-   - It also prints an alert message: `[ALERT] Sensor Exceeded Threshold! Value: XXX`.
-   - Once the sensor value drops below the threshold, the blinking task returns to the slow `1000ms` heartbeat interval.
-4. **Independent External Control**: The **External LED** connected to D1 remains fully controllable by the user via UART commands without interfering with the timing of the sensor task or alarm loop.
+### 1. Rollover-Safe Timing Equation
+Inside embedded microcontrollers, system clock counters like `millis()` will eventually overflow and wrap around to `0` (for 32-bit unsigned integers, this occurs every **49.7 days**). The scheduler handles this rollover seamlessly using unsigned subtraction:
 
----
-
-# Command Shell CLI
-
-Through the UART serial monitor, you can issue commands directly to the ESP8266:
-
-| Command | Action |
-|---|---|
-| `led on` | Turn ON the External LED (`GPIO5` / `D1`) |
-| `led off` | Turn OFF the External LED (`GPIO5` / `D1`) |
-| `led toggle` | Toggle the state of the External LED |
-| `stats` | Output diagnostic statistics for the scheduler tasks |
-
-### Interactive Diagnostics Output (`stats`)
-Running `stats` prints a diagnostic report of the cooperative scheduler's performance:
-
-```text
---- Scheduler Diagnostics & Timing Stats ---
-Job Name     | State  | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)     
------------------------------------------------------------------------------------------
-BlinkInternal| RUN    | 1000         | 42           | 2            | 12           | 3           
-SampleSensor | RUN    | 1000         | 42           | 112          | 145          | 116         
-UARTCommands | RUN    | 50           | 840          | 1            | 8            | 1           
------------------------------------------------------------------------------------------
-```
-
-- **Job Name**: The custom label for each task.
-- **State**: Whether the job is actively being polled (`RUN`) or suspended (`STOP`).
-- **Interval(ms)**: The configured execution interval.
-- **Executions**: Total times the job callback function has run since boot.
-- **Last(us)**: The execution duration of the job's last run in microseconds.
-- **Max(us)**: The longest execution time recorded (peak CPU usage for this task).
-- **Avg(us)**: The average execution duration of the task. Keep this as low as possible to maintain a responsive cooperative scheduling environment!
-
----
-
-# Architecture & Code Implementation
-
-## 1. Job and Scheduler Implementation (`src/my_scheduler.h`)
-
-The scheduler maintains an active list of job nodes linked sequentially. Inside the execution block, it uses the standard delta check against `millis()` to handle CPU rollover safely. It profiles runtime in microseconds (`micros()`) around callback execution:
+$$\Delta t = t_{\text{current}} - t_{\text{last}}$$
 
 ```cpp
-void run() {
-    unsigned long currentTime = millis();
-    Job* current = firstJob;
-    
-    while (current != nullptr) {
-        if (current->isRunning) {
-            if (currentTime - current->lastExecutionTime >= current->intervalMs) {
-                current->lastExecutionTime = currentTime;
-                
-                if (current->actionFunction != nullptr) {
-                    unsigned long startTimeUs = micros();
-                    current->actionFunction();
-                    unsigned long elapsedUs = micros() - startTimeUs;
+if (currentTime - current->lastExecutionTime >= current->intervalMs)
+```
+Due to two's-complement arithmetic, if $t_{\text{current}}$ rolls over (e.g., $5$) and $t_{\text{last}}$ is near the maximum limit (e.g., $2^{32} - 10$), the subtraction wraps around to the correct positive difference ($15$), guaranteeing timing stability indefinitely.
 
-                    // Update timing statistics
-                    current->executionCount++;
-                    current->lastRunTimeUs = elapsedUs;
-                    current->totalRunTimeUs += elapsedUs;
-                    if (elapsedUs > current->maxRunTimeUs) {
-                        current->maxRunTimeUs = elapsedUs;
-                    }
-                }
-                
-                if (current->repeatCount > 0) {
-                    current->repeatCount--;
-                    if (current->repeatCount == 0) {
-                        current->stop();
-                    }
-                }
-            }
-        }
-        current = current->nextJob;
-    }
-}
+### 2. Linked List Task Queue
+Instead of allocating a fixed-size array which restricts flexibility, tasks are chained using a singly linked list. When a job is registered via `core.add(newJob)`, it is appended to the list tail in $O(N)$ time. Traversal in the execution loop is a linear $O(N)$ sweep, which completes in microseconds.
+
+---
+
+# Step-by-Step Interfacing Example
+
+The project workspace contains a fully structured example illustrating how to read two sensors and actuate two outputs concurrently without blocking.
+
+### Hardware Interface Configuration
+
+```
+                         ESP8266 (NodeMCU)
+                         +---------------+
+                         |   GPIO2/D4    |---> [Internal Onboard LED] (Active-Low)
+                         |               |
+                         |   GPIO5/D1    |---> [External Alarm LED]   (Active-High)
+                         |               |
+   [IR Sensor] --------->|   GPIO4/D2    |
+ (Digital Proximity)     |               |
+                         |     A0        |<--- [Temp Sensor] (LM35/Thermistor)
+                         +---------------+
 ```
 
-## 2. Example Application (`src/main.cpp`)
+The example code is placed in [example.cpp](file:///home/garv/Desktop/scheduler/src/example.cpp). To use it, simply copy its contents into `main.cpp` or change the source filter configuration in your PlatformIO build settings.
 
-The system initialization registers the tasks, sets pin configurations, and transitions to the scheduler runner loop:
+### Fully Documented Example Code
+Below is the C++ implementation showing how the cooperative tasks interact via shared states:
 
 ```cpp
 #include <Arduino.h>
+#include <ESP8266WiFi.h>
+
 #include "my_scheduler.h"
 #include "drivers/led.h"
 #include "drivers/adc.h"
 #include "drivers/uart.h"
 
+#define IR_SENSOR_PIN 4
+#define TEMP_ALERT_THRESHOLD 700
+
 Scheduler core;
 
-void blinkInternalLED();
-void sampleSensor();
-void handleUARTCommands();
+void blinkHeartbeat();
+void readIRSensor();
+void readTemperatureSensor();
+void handleUARTShell();
 
-Job blinkJob(1000, INF, &blinkInternalLED);
-Job adcJob(1000, INF, &sampleSensor);
-Job serialJob(50, INF, &handleUARTCommands);
+// Instantiate Job objects (Interval in ms, Repeat Count, Function pointer)
+Job heartbeatJob(1000, INF, &blinkHeartbeat);       // Blinks internal LED
+Job irSensorJob(100, INF, &readIRSensor);            // Polls digital IR sensor
+Job tempSensorJob(1500, INF, &readTemperatureSensor); // Reads analog temperature
+Job uartShellJob(50, INF, &handleUARTShell);          // Command parser
+
+volatile bool irTriggered = false;
+volatile bool tempHigh = false;
+uint16_t latestTempRaw = 0;
 
 void setup() {
     custom_uart_init(115200);
     led_init();
     adc_init();
 
-    core.add(blinkJob);
-    core.add(adcJob);
-    core.add(serialJob);
+    pinMode(IR_SENSOR_PIN, INPUT);
 
-    blinkJob.start();
-    adcJob.start();
-    serialJob.start();
+    core.add(heartbeatJob);
+    core.add(irSensorJob);
+    core.add(tempSensorJob);
+    core.add(uartShellJob);
+
+    heartbeatJob.start();
+    irSensorJob.start();
+    tempSensorJob.start();
+    uartShellJob.start();
+
+    // Disable WiFi to conserve power and reduce ADC noise
+    WiFi.mode(WIFI_OFF);
+    wifi_set_sleep_type(LIGHT_SLEEP_T);
 }
 
 void loop() {
-    core.run(); // Keeps executing all registered non-blocking tasks
+    core.run(); // Checks time deltas and runs pending jobs
+}
+
+// TASK 1: System Heartbeat Status Blinker
+void blinkHeartbeat() {
+    led_internal_toggle();
+    
+    // Scale blinking frequency based on alarm states
+    if (irTriggered || tempHigh) {
+        heartbeatJob.intervalMs = 150; // Rapid alert flash
+    } else {
+        heartbeatJob.intervalMs = 1000; // Slow calm heartbeat pulse
+    }
+}
+
+// TASK 2: IR Proximity Sensor Polling
+void readIRSensor() {
+    // Read state from digital IR Sensor. LOW means proximity detected
+    bool currentVal = (digitalRead(IR_SENSOR_PIN) == LOW);
+    
+    if (currentVal != irTriggered) {
+        irTriggered = currentVal;
+        if (irTriggered) {
+            Serial.println("[ALERT] IR Sensor: Obstacle Detected!");
+            led_external_set(1); // Set Alarm LED ON
+        } else {
+            Serial.println("[STATUS] IR Sensor: Cleared.");
+            if (!tempHigh) led_external_set(0); // Set Alarm LED OFF
+        }
+    }
+}
+
+// TASK 3: Analog Temperature Sensor Monitor
+void readTemperatureSensor() {
+    latestTempRaw = adc_read_nonblocking();
+    
+    if (latestTempRaw > TEMP_ALERT_THRESHOLD) {
+        if (!tempHigh) {
+            tempHigh = true;
+            Serial.printf("[ALERT] Temperature Threshold Exceeded! Raw: %d\n", latestTempRaw);
+            led_external_set(1);
+        }
+    } else {
+        if (tempHigh) {
+            tempHigh = false;
+            Serial.printf("[STATUS] Temperature returned to normal. Raw: %d\n", latestTempRaw);
+            if (!irTriggered) led_external_set(0);
+        }
+    }
+}
+
+// TASK 4: UART Command Interpreter Shell
+void handleUARTShell() {
+    char cmd[64];
+    if (uart_get_command_nonblocking(cmd, sizeof(cmd))) {
+        if (strcmp(cmd, "stats") == 0) {
+            // Stats printing code...
+        }
+    }
 }
 ```
 
 ---
 
-# Advantages of Cooperative Scheduling
+# Timing Diagnostics and Profiling
 
-1. **Deterministic Execution**: Tasks are called at reliable timing intervals when standard coding structures are designed properly.
-2. **Zero Context-Switch Overhead**: Avoids complex register stacking or stack allocations required by preemptive RTOS cores.
-3. **No Synchronization Primitive Requirements**: Because tasks do not interrupt one another, there is no chance of race conditions, deadlocks, or need for Semaphores/Mutexes.
-4. **Lightweight Footprint**: Memory usage is minimized to simple `Job` node instances chained inside RAM.
+A critical issue in cooperative scheduling is that a single blocking or poorly designed task (e.g. executing `delay(100)`) halts the entire scheduler, delaying other jobs.
+
+To monitor this, the scheduler implements microsecond-level timing diagnostics around callback executions using `micros()`. Running the `stats` command via the Serial interface prints a task execution dashboard:
+
+```text
+--- Scheduler Diagnostics & Timing Stats ---
+Task Name       | State  | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)     
+---------------------------------------------------------------------------------------------
+BlinkHeartbeat  | RUN    | 1000         | 120          | 2            | 14           | 3           
+ReadIRSensor    | RUN    | 100          | 1200         | 4            | 28           | 5           
+ReadTempSensor  | RUN    | 1500         | 80           | 112          | 168          | 115         
+UARTShell       | RUN    | 50           | 2400         | 1            | 12           | 2           
+---------------------------------------------------------------------------------------------
+```
+
+- **Last(us)**: The execution duration of the job's last run in microseconds.
+- **Max(us)**: The longest execution time recorded. Helpful for identifying peak latency spikes.
+- **Avg(us)**: The average execution duration of the task. If any task reports values in the milliseconds range ($>1000\text{ }\mu\text{s}$), it indicates a blocking operation that should be refactored to prevent latency propagation across other tasks.
+
+---
+
+# Getting Started Guide
+
+### 1. Compile the Custom Application
+Open your console shell in the directory and compile the program:
+```bash
+# Builds main.cpp (configured inside platformio.ini)
+~/.platformio/penv/bin/platformio run
+```
+
+### 2. Upload Firmware
+Upload the compiled binaries to the ESP8266 board:
+```bash
+~/.platformio/penv/bin/platformio run --target upload
+```
+
+### 3. Open Serial Shell Monitor
+Interact with the command shell via PlatformIO's device monitor:
+```bash
+~/.platformio/penv/bin/platformio device monitor
+```
+Type `stats` into the prompt to review task performance statistics.
