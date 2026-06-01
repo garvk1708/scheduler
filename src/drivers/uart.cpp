@@ -3,7 +3,7 @@
 static char rx_buffer[128];
 static size_t rx_index = 0;
 
-void uart_init(unsigned long baud) {
+void custom_uart_init(unsigned long baud) {
     Serial.begin(baud);
     delay(10);
     rx_index = 0;

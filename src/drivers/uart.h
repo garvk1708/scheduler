@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-void uart_init(unsigned long baud);
+void custom_uart_init(unsigned long baud);
 bool uart_get_command_nonblocking(char* buffer, size_t max_len);
 
 #ifdef __cplusplus
