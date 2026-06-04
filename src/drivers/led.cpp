@@ -10,7 +10,7 @@ void led_init(void) {
     led_external_set(0);
 }
 
-// Legacy wrappers pointing to internal LED
+// Legacy wrappers — kept for backward compatibility with older example code
 void led_toggle(void) {
     led_internal_toggle();
 }
@@ -21,22 +21,14 @@ void led_set(uint8_t state) {
 
 void led_internal_set(uint8_t state) {
     led_internal_state = state ? 1 : 0;
-    // Onboard LED is active-low
-    if (led_internal_state == 1) {
-        digitalWrite(LED_PIN, LOW);
-    } else {
-        digitalWrite(LED_PIN, HIGH);
-    }
+    // Onboard LED on NodeMCU is active-low (LOW = on)
+    digitalWrite(LED_PIN, led_internal_state ? LOW : HIGH);
 }
 
 void led_external_set(uint8_t state) {
     led_external_state = state ? 1 : 0;
-    // External LED is active-high
-    if (led_external_state == 1) {
-        digitalWrite(EXT_LED_PIN, HIGH);
-    } else {
-        digitalWrite(EXT_LED_PIN, LOW);
-    }
+    // External LED is wired active-high
+    digitalWrite(EXT_LED_PIN, led_external_state ? HIGH : LOW);
 }
 
 void led_internal_toggle(void) {

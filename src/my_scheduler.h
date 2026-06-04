@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 
+// Pass INF as repeatCount to keep a job running indefinitely
 #define INF -1
 
 typedef void (*JobFunction)();
@@ -31,13 +32,15 @@ public:
     }
 
     unsigned long intervalMs;
+    // Note: repeatCount is decremented in-place each execution. To restart a
+    // finite job (e.g. a one-shot timer), reset repeatCount before calling start().
     int repeatCount;
     JobFunction actionFunction;
     bool isRunning;
     unsigned long lastExecutionTime;
     Job* nextJob;
 
-    // Diagnostics / Profiling metrics
+    // Per-task execution timing — populated by the scheduler on every run
     unsigned long executionCount;
     unsigned long maxRunTimeUs;
     unsigned long totalRunTimeUs;
@@ -48,6 +51,8 @@ class Scheduler {
 public:
     Scheduler() : firstJob(nullptr) {}
 
+    // Appends a job to the end of the queue. Don't add the same job twice —
+    // that will corrupt the nextJob pointer and cause an infinite loop in run().
     void add(Job& newJob) {
         if (firstJob == nullptr) {
             firstJob = &newJob;
@@ -67,6 +72,8 @@ public:
         
         while (current != nullptr) {
             if (current->isRunning) {
+                // Unsigned subtraction handles millis() rollover correctly —
+                // the difference wraps to the right value even across the 32-bit boundary
                 if (currentTime - current->lastExecutionTime >= current->intervalMs) {
                     current->lastExecutionTime = currentTime;
                     
@@ -75,7 +82,6 @@ public:
                         current->actionFunction();
                         unsigned long elapsedUs = micros() - startTimeUs;
 
-                        // Update diagnostics
                         current->executionCount++;
                         current->lastRunTimeUs = elapsedUs;
                         current->totalRunTimeUs += elapsedUs;
@@ -84,6 +90,7 @@ public:
                         }
                     }
                     
+                    // Decrement the repeat counter; stop the job once exhausted
                     if (current->repeatCount > 0) {
                         current->repeatCount--;
                         if (current->repeatCount == 0) {
@@ -96,7 +103,6 @@ public:
         }
     }
 
-    // Helper to get first job for diagnostics printing
     Job* getFirstJob() const {
         return firstJob;
     }

@@ -1,60 +1,60 @@
 # Cooperative Task Scheduler for ESP8266
 
-A custom, low-overhead cooperative task scheduler built from scratch for the ESP8266 (NodeMCU) in embedded C++. This project demonstrates how to run concurrent periodic operations without blocking the CPU or using resource-heavy real-time operating systems (RTOS).
+A lightweight cooperative task scheduler built from scratch for the ESP8266 (NodeMCU) in C++. The goal was to avoid pulling in FreeRTOS just to run a few periodic tasks — this handles it with a simple linked list and a timing check in the main loop.
 
 ---
 
-# Why Cooperative Task Scheduling?
+# Why Cooperative Scheduling?
 
-In embedded systems development, managing multiple periodic tasks (e.g., polling sensors, blinking status lights, parsing serial commands) is a core challenge. Developers typically rely on one of three patterns:
+When building on the NodeMCU, managing multiple periodic tasks (polling sensors, blinking LEDs, reading serial commands) without `delay()` quickly becomes the core problem. There are three common approaches:
 
 ```
 +---------------------------------------------------------------------------------+
 |                                 1. BLOCKING DELAYS                              |
 |  Loop:  [Read Sensor] -> (Delay 1000ms) -> [Blink LED] -> (Delay 500ms)         |
-|  * Disadvantage: The CPU blocks completely during delay, losing data & command  |
-|                  inputs. Concurrent operations are impossible.                  |
+|  * The CPU sits doing nothing during delay. Miss serial input, miss sensor       |
+|    edges, can't run anything else concurrently.                                 |
 +---------------------------------------------------------------------------------+
                                          |
                                          v
 +---------------------------------------------------------------------------------+
 |                            2. PREEMPTIVE RTOS (FreeRTOS)                        |
-|  Tasks interrupt each other based on priority. Needs mutexes/semaphores.       |
-|  * Disadvantage: Significant RAM overhead, stack allocation requirements, context|
-|                  switching lag, and risk of deadlocks/race conditions.          |
+|  Tasks interrupt each other by priority. Needs mutexes, semaphores, stacks.    |
+|  * Works, but overkill for a NodeMCU project. Each task needs its own stack     |
+|    allocation, and shared state becomes a race condition minefield.             |
 +---------------------------------------------------------------------------------+
                                          |
                                          v
 +---------------------------------------------------------------------------------+
 |                       3. COOPERATIVE SCHEDULING (This Project)                  |
-|  Tasks voluntarily yield control. Traverses a linked list checking elapsed      |
-|  time on each loop iteration. Runs tasks when scheduled interval expires.       |
-|  * Advantage: Zero context-switching lag, extremely lightweight (runs on small  |
-|               microcontrollers), zero race conditions (single thread execution).|
+|  Tasks voluntarily yield. The main loop traverses a linked list of jobs and     |
+|  fires any whose elapsed time has passed their interval.                        |
+|  * No context switches, no stack-per-task overhead, no race conditions.         |
+|    Runs fine even on an 80MHz ESP8266 with 80KB RAM.                            |
 +---------------------------------------------------------------------------------+
 ```
 
-### Architectural Comparison
+### Comparison
 
-| Metric | Blocking Delays (`delay`) | Preemptive RTOS (FreeRTOS) | Cooperative Scheduler (Our design) |
+| Metric | Blocking Delays (`delay`) | Preemptive RTOS (FreeRTOS) | Cooperative Scheduler (this) |
 |---|---|---|---|
-| **CPU Efficiency** | Low (wastes cycles in delay loops) | Moderate (context switch overhead) | **High** (checks elapsed time and yields) |
-| **RAM Footprint** | Extremely Low | High (requires separate stack per task) | **Extremely Low** (uses single main stack) |
-| **Simplicity** | High (simple but non-functional) | Low (requires mutexes, critical sections) | **High** (straightforward C++ execution) |
-| **Race Conditions**| None (sequential execution) | High risk (requires thread safety) | **None** (sequential non-blocking execution) |
-| **Max Concurrent Tasks** | 1 (effectively) | Limited by RAM stacks (e.g., 5-10) | **Unlimited** (limited only by CPU bandwidth) |
+| **CPU Efficiency** | Low — wastes cycles sitting in delay loops | Moderate — context switch overhead | High — checks elapsed time and yields immediately |
+| **RAM Footprint** | Extremely Low | High — separate stack per task | Extremely Low — single main stack shared by all tasks |
+| **Simplicity** | Easy to write, hard to scale | Lots of boilerplate (mutexes, critical sections) | Straightforward — just register a function and an interval |
+| **Race Conditions** | None (everything is sequential) | High risk without careful locking | None — single-threaded execution, tasks never interleave |
+| **Max Concurrent Tasks** | 1, effectively | Limited by available RAM for stacks | As many as you want, CPU time permitting |
 
 ---
 
 # Repository Layout
 
 ```text
-├── platformio.ini         # PlatformIO project configuration
+├── platformio.ini         # PlatformIO project config (NodeMCU v2, 115200 baud)
 ├── src/
-│   ├── main.cpp           # Barebones boilerplate ready for custom tasks
-│   ├── my_scheduler.h     # Core timing execution scheduler engine
-│   └── drivers/           # Hardware abstraction layers (LED, ADC, UART)
-└── examples/              # Preconfigured application reference files
+│   ├── main.cpp           # Clean boilerplate — start here
+│   ├── my_scheduler.h     # The scheduler engine (header-only)
+│   └── drivers/           # Hardware abstraction for LED, ADC, UART
+└── examples/              # Four ready-to-run example programs
     ├── 01_blink.cpp
     ├── 02_dual_sensor_alarm.cpp
     ├── 03_one_shot_timers.cpp
@@ -65,7 +65,7 @@ In embedded systems development, managing multiple periodic tasks (e.g., polling
 
 # Scheduler Engine Architecture
 
-The scheduler is built around two primary abstractions: a `Job` (representing a task) and the `Scheduler` (handling task traversal).
+Two classes: `Job` holds a task's interval, repeat count, callback pointer, and profiling data. `Scheduler` owns a linked list of `Job` pointers and walks it on every `loop()` call.
 
 ```
                       Scheduler Object
@@ -85,85 +85,102 @@ The scheduler is built around two primary abstractions: a `Job` (representing a 
 +----------------+   +----------------+   +----------------+
 ```
 
-### 1. Rollover-Safe Timing Equation
-Inside embedded microcontrollers, system clock counters like `millis()` will eventually overflow and wrap around to `0` (for 32-bit unsigned integers, this occurs every **49.7 days**). The scheduler handles this rollover seamlessly using unsigned subtraction:
+### Rollover-Safe Timing
 
-$$\Delta t = t_{\text{current}} - t_{\text{last}}$$
+`millis()` on a 32-bit unsigned counter wraps back to zero after ~49.7 days. The scheduler handles this transparently using unsigned subtraction:
 
 ```cpp
 if (currentTime - current->lastExecutionTime >= current->intervalMs)
 ```
-Due to two's-complement arithmetic, if $t_{\text{current}}$ rolls over (e.g., $5$) and $t_{\text{last}}$ is near the maximum limit (e.g., $2^{32} - 10$), the subtraction wraps around to the correct positive difference ($15$), guaranteeing timing stability indefinitely.
 
-### 2. Linked List Task Queue
-Instead of allocating a fixed-size array which restricts flexibility, tasks are chained using a singly linked list. When a job is registered via `core.add(newJob)`, it is appended to the list tail in $O(N)$ time. Traversal in the execution loop is a linear $O(N)$ sweep.
+Because of how two's-complement unsigned arithmetic works, the subtraction produces the correct positive difference even across the wraparound boundary — no special-case needed.
 
----
+For example: if `currentTime` just rolled over to `5` and `lastExecutionTime` is `4294967290` (near the 32-bit max), then `5 - 4294967290 = 11` in unsigned arithmetic, which is the actual elapsed time. The comparison still works correctly.
 
-# Preconfigured Examples Index
+### Linked List Task Queue
 
-To explore different cooperative multitasking configurations, you can copy the contents of any file in [examples/](file:///home/garv/Desktop/scheduler/examples/) directly into [src/main.cpp](file:///home/garv/Desktop/scheduler/src/main.cpp) and compile/upload it to your ESP8266.
+Tasks are chained via a singly linked list rather than a fixed-size array. This keeps memory usage proportional to the number of registered tasks instead of pre-allocating a worst-case slot count. `core.add()` appends to the tail; `core.run()` walks the full list on every call.
 
-### [1. Blink Example](file:///home/garv/Desktop/scheduler/examples/01_blink.cpp)
-- **Concept**: A simple non-blocking status blinker.
-- **Goal**: Demonstrates registering a basic callback function to toggle the internal onboard LED every 500ms without utilizing `delay()`.
-
-### [2. Dual-Sensor Alarm Example](file:///home/garv/Desktop/scheduler/examples/02_dual_sensor_alarm.cpp)
-- **Concept**: A physical safety monitoring alarm loop.
-- **Hardware setup**:
-  - **IR Proximity Sensor**: Digital sensor reading on GPIO4 (D2).
-  - **Temperature Sensor**: Analog input on A0.
-  - **Internal LED**: Onboard heartbeat.
-  - **External LED**: GPIO5 (D1) alarm output.
-- **Goal**: Illustrates dynamic task rescheduling. The internal LED blinks slowly (1s) under safe states but switches to a rapid panic flash (150ms) if the IR sensor detects an obstacle or the temperature goes above a defined threshold. The external LED acts as a physical alarm flag.
-
-### [3. One-Shot Software Timers](file:///home/garv/Desktop/scheduler/examples/03_one_shot_timers.cpp)
-- **Concept**: Dynamic task lifecycle management.
-- **Goal**: Shows how to run a task a finite number of times (one-shot). When a user types `trigger 3000` via the CLI monitor, it switches ON the external LED and schedules a timer job with a `repeatCount = 1` to execute in 3000ms. Once the timer finishes, it turns OFF the LED and self-suspends.
-
-### [4. CPU Timing Profiling](file:///home/garv/Desktop/scheduler/examples/04_cpu_profiling.cpp)
-- **Concept**: Detecting blocking execution.
-- **Goal**: Simulates a "badly designed" blocking function that blocks the CPU for 1000ms (`delay(1000)`) every 8 seconds. This demonstrates task execution jitter: when the blocker task runs, other tasks freeze. Querying `stats` will immediately isolate the blocker by showing a massive `Max(us)` execution time value.
+One thing to keep in mind: `repeatCount` is decremented in-place on the `Job` object. If you want to restart a finite job (e.g., a one-shot timer), you need to set `repeatCount` back before calling `start()` again — see `examples/03_one_shot_timers.cpp` for how this works in practice.
 
 ---
 
-# Timing Diagnostics and Profiling
+# Examples
 
-A critical rule of cooperative scheduling is that tasks must be **short and non-blocking**. If a task halts the CPU, other tasks are starved.
+To run any example, copy its contents into `src/main.cpp` and flash to the board.
 
-To monitor CPU usage, the scheduler integrates microsecond-level timing tracking around callback executions using `micros()`. Typing `stats` in the serial prompt displays a timing breakdown:
+### 1. Blink — `examples/01_blink.cpp`
+The "hello world" of this scheduler. Registers one job that toggles the onboard LED every 500ms. No `delay()`, just a timing check on each loop pass.
+
+### 2. Dual-Sensor Alarm — `examples/02_dual_sensor_alarm.cpp`
+A more realistic scenario — four concurrent tasks running at different rates:
+- **IR proximity sensor** (GPIO4 / D2): polled every 100ms
+- **Temperature sensor** (A0 / ADC0): read every 1500ms via `analogRead()`
+- **Heartbeat LED** (onboard): blinks at 1s normally, switches to 150ms rapid flash when either sensor trips an alert
+- **Serial CLI** (UART): parsed every 50ms for `stats` and `led toggle` commands
+
+The LED blink rate change is done by directly modifying `heartbeatJob.intervalMs` inside the task — no extra state machine needed.
+
+**Wiring:**
+- IR sensor OUT → D2 (GPIO4), VCC → 3.3V, GND → GND
+- External alarm LED → D1 (GPIO5) through a 330Ω resistor to GND
+- Temperature sensor (LM35 or thermistor) → A0
+
+### 3. One-Shot Software Timers — `examples/03_one_shot_timers.cpp`
+Shows how `repeatCount` enables software timers. Typing `trigger 3000` over serial turns on the external LED and arms a job with `repeatCount = 1` and a 3000ms interval. When it fires, it turns the LED off and stops itself.
+
+The key pattern: the one-shot job is registered to the scheduler at startup but left in a stopped state. It only activates when explicitly started with updated parameters.
+
+### 4. CPU Profiling — `examples/04_cpu_profiling.cpp`
+Intentionally includes a bad task that calls `delay(1000)` every 8 seconds to simulate blocking code. The other tasks (100ms fast blink, 1s logger) freeze during that window. Typing `stats` after a few block cycles shows the blocker's `Max(us)` column sitting at ~1,000,000µs while the other tasks show their normal sub-30µs numbers. Useful for understanding why you need to keep tasks short.
+
+---
+
+# Timing Diagnostics
+
+Every task's execution time is measured using `micros()` brackets around the callback. `stats` over serial prints a live table:
 
 ```text
 --- Scheduler Timing Diagnostics ---
-Task Name       | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)     
+Task Name       | Interval(ms) | Executions   | Last(us)     | Max(us)      | Avg(us)
 --------------------------------------------------------------------------------------
-FastTask(100ms) | 100          | 1200         | 4            | 28           | 5           
-LoggerTask(1s)  | 1000         | 120          | 2            | 14           | 3           
-Blocker(8s)     | 8000         | 15           | 1000142      | 1000214      | 1000150     
-UARTShell(50ms) | 50           | 2400         | 1            | 12           | 2           
+FastTask(100ms) | 100          | 1200         | 4            | 28           | 5
+LoggerTask(1s)  | 1000         | 120          | 2            | 14           | 3
+Blocker(8s)     | 8000         | 15           | 1000142      | 1000214      | 1000150
+UARTShell(50ms) | 50           | 2400         | 1            | 12           | 2
 --------------------------------------------------------------------------------------
 ```
-If you detect any task reporting high execution times (e.g., `Blocker(8s)` with $1,000,150\text{ }\mu\text{s}$), it indicates CPU blocking that should be refactored into shorter state-machine steps.
+
+If a task's `Max(us)` is dramatically higher than its `Last(us)`, it blocked the CPU at some point. The fix is to break the task into a state machine that does a small chunk of work per call instead of spinning in a loop.
 
 ---
 
-# Getting Started Guide
+# Getting Started
 
-### 1. Build the Boilerplate Project
-To compile the clean scheduler template in [src/main.cpp](file:///home/garv/Desktop/scheduler/src/main.cpp):
+### 1. Build
+
+```bash
+pio run
+```
+
+Or if `pio` isn't in your PATH yet:
+
 ```bash
 ~/.platformio/penv/bin/platformio run
 ```
 
 ### 2. Upload to ESP8266
-Ensure that your board is connected and any active Serial Monitors are **closed** (to prevent port lock collisions), then run:
+
+Close any open serial monitors first (they hold the port), then:
+
 ```bash
-~/.platformio/penv/bin/platformio run --target upload
+pio run --target upload
 ```
 
-### 3. Open Serial Shell Monitor
-To open the console shell monitor to communicate with the board:
+### 3. Open Serial Monitor
+
 ```bash
-~/.platformio/penv/bin/platformio device monitor
+pio device monitor
 ```
-Press `Ctrl+C` or `Ctrl+]` to close the serial monitor before uploading subsequent code.
+
+Press `Ctrl+C` or `Ctrl+]` to exit before uploading again.

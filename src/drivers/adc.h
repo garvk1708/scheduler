@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 void adc_init(void);
-uint16_t adc_read_nonblocking(void);
+uint16_t adc_read(void);
 
 #ifdef __cplusplus
 }

@@ -10,6 +10,10 @@ void custom_uart_init(unsigned long baud) {
     memset(rx_buffer, 0, sizeof(rx_buffer));
 }
 
+// Reads available bytes from Serial without blocking. Returns true and fills
+// `buffer` when a newline-terminated command is complete.
+// If the buffer fills before a newline arrives, the partial input is silently
+// discarded and the buffer resets — keeps the loop moving rather than stalling.
 bool uart_get_command_nonblocking(char* buffer, size_t max_len) {
     bool command_ready = false;
     
@@ -29,7 +33,7 @@ bool uart_get_command_nonblocking(char* buffer, size_t max_len) {
             if (rx_index < sizeof(rx_buffer) - 1) {
                 rx_buffer[rx_index++] = c;
             } else {
-                rx_index = 0;
+                rx_index = 0; // overflow — drop and reset
             }
         }
     }

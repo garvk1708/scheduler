@@ -3,42 +3,36 @@
 #include "drivers/led.h"
 #include "drivers/uart.h"
 
-// Instantiate the scheduler
 Scheduler core;
 
-// Declare task functions
 void processCLI();
 void turnOffLED();
 void periodicStatus();
 
-// Define Jobs:
-// cliJob runs continuously (INF) every 50ms to read commands
 Job cliJob(50, INF, &processCLI);
-
-// statusJob runs continuously every 1000ms
 Job statusJob(1000, INF, &periodicStatus);
 
-// oneShotOffJob is a software timer configured to run exactly ONCE (1 repeat)
-// It starts in a stopped/inactive state and will be started dynamically.
+// One-shot timer job — registered at startup but left stopped.
+// Gets configured and started dynamically when the 'trigger' command comes in.
+// repeatCount is reset to 1 each time so it fires exactly once per trigger.
 Job oneShotOffJob(3000, 1, &turnOffLED);
 
 void setup() {
     custom_uart_init(115200);
     led_init();
 
-    // Register all tasks
     core.add(cliJob);
     core.add(statusJob);
-    core.add(oneShotOffJob); // Note: It is stopped initially since repeatCount is not yet active
+    core.add(oneShotOffJob);
 
-    // Start baseline tasks
     cliJob.start();
     statusJob.start();
+    // oneShotOffJob left stopped — starts only on user command
 
     Serial.println("\n==============================================");
-    Serial.println("   Cooperative Scheduler - One-Shot Software Timers");
+    Serial.println("   Cooperative Scheduler - One-Shot Timers");
     Serial.println("==============================================");
-    Serial.println("Supported commands:");
+    Serial.println("Commands:");
     Serial.println("  'trigger X'   - Turn ON external LED for X milliseconds");
     Serial.println("==============================================\n");
 }
@@ -47,35 +41,29 @@ void loop() {
     core.run();
 }
 
-// Baseline Task: Prints status heartbeat
 void periodicStatus() {
-    Serial.println("[Heartbeat] System running cooperatively...");
+    Serial.println("[Heartbeat] running...");
 }
 
-// Dynamic Action: Turn off external LED and log it
 void turnOffLED() {
     led_external_set(0);
-    Serial.println("[TIMER EVENT] Timer expired: External LED turned OFF.");
+    Serial.println("[TIMER] Expired — external LED off.");
 }
 
-// Parser Task: Monitors commands to trigger the one-shot timer
 void processCLI() {
     char cmd[64];
     if (uart_get_command_nonblocking(cmd, sizeof(cmd))) {
         if (strncmp(cmd, "trigger ", 8) == 0) {
-            // Parse duration
             long duration = atol(cmd + 8);
-            if (duration <= 0) duration = 1000; // default 1 second
+            if (duration <= 0) duration = 1000;
 
-            Serial.printf("[CLI] Command received. Turning ON External LED for %ld ms...\n", duration);
-            
-            // Turn ON the LED physically
+            Serial.printf("[CLI] LED on for %ld ms\n", duration);
             led_external_set(1);
 
-            // Configure the timer job dynamically
+            // Reset and arm the one-shot timer with the requested duration
             oneShotOffJob.intervalMs = duration;
-            oneShotOffJob.repeatCount = 1; // Run exactly once
-            oneShotOffJob.start();         // Start timer
+            oneShotOffJob.repeatCount = 1;
+            oneShotOffJob.start();
         } else {
             Serial.printf("Unknown command. Try: 'trigger 3000'\n");
         }
